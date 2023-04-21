@@ -1,9 +1,15 @@
 ﻿using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
-namespace FolderWatcher;
+namespace FolderWatcher.BackgroundServices;
 
 public sealed class GlobalExceptionHandlerService : IHostedService
 {
+    private readonly ILogger<GlobalExceptionHandlerService> _logger;
+
+    public GlobalExceptionHandlerService(ILogger<GlobalExceptionHandlerService> logger) => 
+        _logger = logger;
+
     public Task StartAsync(CancellationToken cancellationToken)
     {
         AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
@@ -19,9 +25,7 @@ public sealed class GlobalExceptionHandlerService : IHostedService
     private void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
     {
         var ex = (Exception)e.ExceptionObject;
-        Console.WriteLine("Ошибка:");
-        Console.WriteLine(ex.Message);
-        Console.WriteLine(ex.StackTrace);
+        _logger.LogCritical(ex, "Критическая ошибка, остановка приложения...");
         
         Environment.Exit(1);
     }
