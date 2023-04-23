@@ -1,6 +1,9 @@
 ## Необходимо реализовать background сервис, который будет следить за папкой на диске и регистрировать все изменения, производимые в этой папке.  
 
----
+---  
+Задача реализована с помощью HostedService для background service (FileWatcherService), IOptionsMonitor для обновления конфигурации, ILogger для логирования, Cronos для разбора cron-выражений.    
+Приложение развёрнуто и работает в Docker контейнере.  
+Смотреть запись работы приложения - https://disk.yandex.ru/i/QwS-ZUNvOdzcNQ
 
 ## Требования
 - [Поддержка windows и linux-style путей](#поддержка-windows-и-linux-style-путей)
@@ -12,7 +15,8 @@
 ## Дополнительные задания
 - [Реализовать возможность установки определенного периода времени отслеживания изменений (например, с 8:00 до 18:00) с помощью cron-выражения,которое должно считываться также из файла настроек](#установка-периода-времени-с-помощью-cron-выражений)  
 - [Реализовать возможность изменения настроек без необходимости перезапуска приложения](#изменение-настроек-без-перезапуска-приложения)
-- [Реализовать логирование в приложении с помощью стандартного механизма ILogger](#реализация-логирования-с-помощью-ilogger)
+- [Реализовать логирование в приложении с помощью стандартного механизма ILogger](#реализация-логирования-с-помощью-ilogger)  
+- [Завернуть решение в docker](#контейнеризация-приложения)
 ___
 
 ## Поддержка windows и linux-style путей
@@ -25,6 +29,8 @@ public static class IoUtils
         path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, path);
         return Path.GetFullPath(path);
     }
+
+    // код
 }
 ```
 
@@ -34,30 +40,26 @@ public static class IoUtils
 
 ## Обработка ошибок
 
-Т.к. фильтры и middleware доступны только для MVC-pipeline, для обработки ошибок в IHostedService можно использовать классический try-cath для локальной обработки ошибок и AppDomain.CurrentDomain.UnhandledException для внешних(не получится использовать везде, т.к. событие даёт возможность логировать информацию об ошибке, но не помечает её как обработанную, потому завершение работы будет в любом случае или с ошибкой необработанного исключение или exit(1) самостоятельно).  
+Т.к. фильтры и middleware доступны только для MVC-pipeline, для обработки ошибок в IHostedService можно использовать классический try-cath для локальной обработки ошибок и AppDomain.CurrentDomain.UnhandledException для внешних(т.к. событие даёт возможность логировать информацию об ошибке, но не помечает её как обработанную, потому завершение работы будет в любом случае или с ошибкой необработанного исключение или exit(1) самостоятельно, для сохранения сервиса активным пользуемся try catch).  
 
 Для обработки локальных ошибок методы приложения следует обернуть в try-cath блок.
 
 ```csharp
-public async Task StartAsync(CancellationToken cancellationToken)
+public Task StartAsync(CancellationToken cancellationToken)
 {
-    await Task.Run(() =>
+    try
     {
-        try
-        {
-            // код
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Ошибка в блоке Х");
-        }
-    }, cancellationToken);
+        _logger.LogInformation(
+            "Запуск сервиса... Ожидаем рабочий период времени учитывая cron '{Cron}' ...", Configuration.Cron);
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Ошибка во время запуска FileWatcherService, попробуйте обновить конфигурацию");
+    }
+    return Task.CompletedTask;
 }
 ```  
-
-Для обработки ошибок извне подходит событие AppDomain.CurrentDomain.UnhandledException.  
-После того, как ошибка будет выведена в консоль - приложение закроется с кодом 1 (приложение завершилось с ошибкой).  
-*Как вариант событие также можно объявить при конфигурации приложения в Program.cs, но вынести его в отдельный класс и запустить сервисом, чтобы при остановке отписаться от события больше похоже на best practice :)   
+GlobalExceptionHandler в виде сервиса.
 
 ```csharp
 public sealed class GlobalExceptionHandlerService : IHostedService
@@ -109,16 +111,15 @@ var host = new HostBuilder()
 
 ## Список изменений по завершению работы.  
 
-Для хранения информации об изменениях в папке создадим класс FileWatcherStorage.  
-Для вывода используем логер, т.к. при остановке сервиса нужно логировать о завершении сервиса и вывести в консоль список изменений, если делать одно с помощью логера, а другое с помощью Console.WriteLine(), то вывод может наложиться друг на друга и текст будет вперемешку.  
-Для хранения путей используем HashSet как список уникальных значений, потому что один и тот же файл, к примеру может изменяться или создавать (удалил, отменил удаление) множество раз и выводить многократно один и тот же файл не корректно.  
-Перед тем как вывести результаты на консоль используем метод CheckData(), чтобы проверить файлы на соответствие их положению в папке статусу, созданные и изменённые файлы должны действительно существовать на диске, а удалённые файлы отсутствовать. Если нужен вывод всех изменений без проверки, то строку можно просто закомментировать.  
-Очищаем коллекции после вывода, присваивая им новую пустую коллекцию, т.к. Clear() сохраняет прежнюю Capacity (не вызывает TrimExcess()), тогда мы имеем вероятность, что коллекция будет только разрастаться, а новая коллекция на 0 элемент будет занимать места как предыдущая, допустим до этого было 100 изменений и мы будет хранить коллекцию, с выделенной памятью под 100 элементов, но их будет 0... Да... Так что new HashSet().
+Для хранения информации об изменениях в папке создадим класс FileWatcherStorage.   
+Для хранения путей используем HashSet как список уникальных значений.
+Очищаем коллекции после вывода, присваивая им новую пустую коллекцию, т.к. Clear() сохраняет прежнюю Capacity (не вызывает TrimExcess()).
 
 ```csharp
 public sealed class FileWatcherStorage
 {
     private readonly ILogger<FileWatcherStorage> _logger;
+    
     private HashSet<string> _created;
     private HashSet<string> _changed;
     private HashSet<string> _deleted;
@@ -134,6 +135,7 @@ public sealed class FileWatcherStorage
     public void AddCreated(string filePath) => _created.Add(filePath);
     public void AddChanged(string filePath) => _changed.Add(filePath);
     public void AddDeleted(string filePath) => _deleted.Add(filePath);
+    
     public void UpdateAfterRenaming(string oldPath, string newPath)
     {
         if (_created.Contains(oldPath))
@@ -149,27 +151,23 @@ public sealed class FileWatcherStorage
         }
     }
 
-    public void WriteAllChanges()
+    public void LogAllChanges()
     {
-        CheckData(); 
-        
-        if(_created.Any()) 
+        if(_created.Any())
+        {
             _logger.LogInformation("Добавленные файлы:\n{Arr}", string.Join('\n', _created));
-        if(_changed.Any()) 
+            _created = new HashSet<string>();
+        }
+        if(_changed.Any())
+        {
             _logger.LogInformation("Обновленные файлы:\n{Arr}", string.Join('\n', _changed));
-        if(_deleted.Any()) 
+            _changed = new HashSet<string>();
+        }
+        if(_deleted.Any())
+        {
             _logger.LogInformation("Удаленные файлы:\n{Arr}", string.Join('\n', _deleted));
-        
-        _created = new HashSet<string>();
-        _changed = new HashSet<string>();
-        _deleted = new HashSet<string>();
-    }
-
-    private void CheckData()
-    {
-        _created = _created.Where(Path.Exists).ToHashSet();
-        _changed = _changed.Where(Path.Exists).ToHashSet();
-        _deleted = _deleted.Where(path => !Path.Exists(path)).ToHashSet();
+            _deleted = new HashSet<string>();
+        }
     }
 }
 ```  
@@ -179,36 +177,17 @@ public sealed class FileWatcherStorage
 ```csharp
 private void OnFileCreated(object sender, FileSystemEventArgs e)
 {
-    _logger.LogInformation("Создан: {EFullPath}", e.FullPath);
-    _storage.AddCreated(e.FullPath);
-}
-
-private void OnFileChanged(object sender, FileSystemEventArgs e)
-{
-    _logger.LogInformation("Изменен: {EFullPath}", e.FullPath);
-    _storage.AddChanged(e.FullPath);
-}
-
-private void OnFileDeleted(object sender, FileSystemEventArgs e)
-{
-    _logger.LogInformation("Удален: {EFullPath}", e.FullPath);
-    _storage.AddDeleted(e.FullPath);
-}
-
-private void OnFileRenamed(object sender, RenamedEventArgs e)
-{
-    _logger.LogInformation("Переименован: {EOldFullPath} -> {EFullPath}", 
-        e.OldFullPath, e.FullPath);
-    _storage.UpdateAfterRenaming(e.OldFullPath, e.FullPath);
+    var path = IoUtils.GetRelativePath(_configuration.Path, e.FullPath);
+    _logger.LogInformation("Создан: {EFullPath}", path);
+    _storage.AddCreated(path);
 }
 ```  
 
 ---
 
 ## Установка периода времени с помощью cron-выражений  
-Неполное решение. Работает только с интервальными значения выражений, например '* 8-18 * * *' для работы в интервале с 8 часов до 18 или '30 1-10 7-12 * *' будет запускать работу c 7 по 12 месяц с 1:30 до 10:30 и т.п., если будет '* 8,17-18 * * *' интервал будет также браться первое и последнее время запуска (с 8:00 до 18:00 часов), т.к. для отслеживания изменений необходима подписка на события FileSystemWatcher и если подписаться на события по тригеру можно, то когда отписываться от них cron-выражение нам не скажет, т.к. планирует только выполнение функции, а не сессию. Можно использовать Quartz или Hangfire для запуска cron работ, но в любом случае нужно будет включать/отключать в рабочий/нерабочий период FileWatcher.EnableRaisingEvents и ?определять? конечное время наблюдения за папкой.   
-CRON-выражение используется в основном для повторяющегося срабатывания по расписанию. В нашем случае по условию необходимо обеспечить работу сервиса наблюдателя в определённый период времени (например 8:00-18:00). Выражение имеет структуру * * * * * (минута час день(месяца) месяц день(недели)), также встречаются выражения из 6 * с добавлением секунд. Для проверки cron-выражений используйте (https://crontab.guru/).  
-! Идея решения: Т.к. наблюдение за файлами реализовано с помощью FileSystemWatcher и подписок на события Created, Changed, Deleted, Renamed и флага EnableRaisingEvents, который эти события разрешает, с помощью System.Timers.Timer мы раз в 30 секунд будем проверять рабочее время сервиса на соответствие временным рамкам заданным cron-выражением, если период правильный то наблюдатель запускается(если не запущен), если вне периода, то останавливается(если запущен). Для этого получаем первое и последнее время срабатывания за день, на их основе формируем период работы.
+Для корректной работы используйте интервалы пример - (* 8-18 * * 1-5):(понедельник-пятница с 8 до 18). Т.к. cron-выражения задают период выполнения, а не интервал работы. По условию нам необходимы именно интервалы, как и для работы с FileSystemWatcher (т.к. работает на ивентах и необходима подписка для отслеживания изменений), потому берём первый и последний запланированный запуск и задаём интервал между ними.  
+Конечно можно запустить Quartz или Hangfire с cron-выражением, но опять же нам нужен интервал, а не период.
 ```csharp
 public static class CronUtils
 {
@@ -225,49 +204,47 @@ public static class CronUtils
 ```
 После этого запускаем таймер и настраиваем временные рамки так, что сервис не будет получать события, если время выполнения не соответствует временным рамкам из конфигурации.
 ```csharp
-var fileWatcher = new FileSystemWatcher(_watchPath)
+// Инициализируем наблюдателя
+_fileWatcher = new FileSystemWatcher(_configuration.Path);
+_fileWatcher.IncludeSubdirectories = true;
+_fileWatcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite;
+_fileWatcher.Created += OnChanged;
+_fileWatcher.Changed += OnChanged;
+_fileWatcher.Deleted += OnChanged;
+_fileWatcher.Renamed += OnRenamed;
+
+_timer = new System.Timers.Timer();
+var isWatching = false;
+var cronExpression = CronExpression.Parse(_configuration.Cron);
+_timer.Interval = 1; // Для первого старта без задержек
+_timer.AutoReset = true; // Держим таймер активным для проверки периода
+_timer.Elapsed += (_,_) =>
 {
-    IncludeSubdirectories = true, 
-    NotifyFilter = NotifyFilters.FileName | 
-                    NotifyFilters.LastWrite | 
-                    NotifyFilters.DirectoryName, 
-    Filter = "*.*"
-};
-
-fileWatcher.Created += OnFileCreated;
-fileWatcher.Changed += OnFileChanged;
-fileWatcher.Deleted += OnFileDeleted;
-fileWatcher.Renamed += OnFileRenamed;
-
-
-var timer = new System.Timers.Timer();
-var isJobStarted = false;
-timer.Interval = 1; // Для первого старта без задержек
-timer.AutoReset = true; // Держим таймер активным для проверки периода
-timer.Elapsed += (_, _) =>
-{
-    timer.Interval = 30000; // 30 секунд
-    var start = CronUtils.GetFirstOccurrenceOfTheDay(_cronExpression);
-    var end = CronUtils.GetLastOccurrenceOfTheDay(_cronExpression);
+    _timer.Interval = 30000; // 30 секунд, успеть в минимальный интервал * * * * * (каждую минуту) 
+    var start = CronUtils.GetFirstOccurrenceOfTheDay(cronExpression);
+    var end = CronUtils.GetLastOccurrenceOfTheDay(cronExpression);
     var now = DateTime.Now;
-    // Если в рабочем промежутке и не запущен, то запускаем
-    if (now >= start && now <= end && !isJobStarted) 
+    if (now >= start && now <= end && !isWatching) 
     {
-        isJobStarted = true;
-        fileWatcher.EnableRaisingEvents = true;
+        _logger.LogInformation(
+            "Запущен просмотр папки '{WatchPath}', {Date} в период {Start} : {End}...", 
+            _configuration.Path, now.ToString("d"), start.ToString("t"), end.ToString("t"));
+        isWatching = true;
+        _fileWatcher.EnableRaisingEvents = true;
     }
-    // Если не в рабочем промежутке и запущен, то останавливаем
-    else if ((now < start || now > end) && isJobStarted)
+    else if ((now < start || now > end) && isWatching)
     {
-        isJobStarted = false;
-        fileWatcher.EnableRaisingEvents = false;
-        _storage.WriteAllChanges();
+        _logger.LogInformation(
+            "Просмотр папки '{WatchPath}' приостановлен до следующего периода...", _configuration.Path);
+        isWatching = false;
+        _fileWatcher.EnableRaisingEvents = false;
+        _storage.LogAllChanges();
     }
 };
 _timer.Start();
 ```  
-Пример работы для '52 13-17 * * *'  
-![](https://sun9-45.userapi.com/impg/iYFgFcpEcasrrfUCAxXYvY8hRs_91mjnk4q2lg/pGLMDtSpuhA.jpg?size=958x487&quality=96&sign=04f4a469e7abd7f85e6f582653985c03&type=album)
+Пример работы для выражения ' 20 16-17 22 1-6 6 ' (каждую 20 минуту с 16 по 17 часы 22 числа в месяцы с 1 по 6 по субботам)  
+![](https://sun9-41.userapi.com/impg/CYR7d-mxbdyT_PAMLfSy0xtiv9Np42qcoK-OjQ/4CqLG84mOmw.jpg?size=826x692&quality=96&sign=1a7ef12533dcbd50fbcbb17d379a325a&type=album)
 
 ## Изменение настроек без перезапуска приложения  
 
@@ -275,11 +252,11 @@ _timer.Start();
 ```csharp
 public class FileWatcherConfiguration
 {
-    public required string Path { get; set; }
-    public required string Cron { get; set; }
+    public string Path { get; set; } = null!;
+    public string Cron { get; set; } = null!;
 }
 ```  
-Зарегистрируем класс в сервисах как конфигурацию TOptions.
+Зарегистрируем класс в сервисах как TOptions.
 ```csharp
 var host = new HostBuilder()
     .ConfigureLogging(logging =>
@@ -300,87 +277,71 @@ var host = new HostBuilder()
     })
     .Build();
 ```
-Передадим класс в конструктор как IOptionsMonitor, который возвращает актуальные значения конфигурации, для отслеживания изменений есть метод OnChange(), в который передадим метод обновляющий конфигурацию.
+Создадим класс (подробнее смотреть класс FileWatcherConfigurator), который будет ответственен за конфигурацию сервиса и создадим метод для применения конфигурации.
 ```csharp
 public sealed class FileWatcherService : IHostedService
 {
-    private readonly IOptionsMonitor<FileWatcherConfiguration> _configurationMonitor;
-
     public FileWatcherService(
-        IOptionsMonitor<FileWatcherConfiguration> configurationMonitor)
+        FileWatcherConfigurator configurator)
     {
-        _configurationMonitor = configurationMonitor;
-        _configurationMonitor.OnChange((_, _) => Task.Run(ReloadConfig).Wait());
+        configurator.ConfigureService(this);
     }
 
     //код
 }
 ```
-Метод ReloadConfig использует метод LoadConfig, который проверяет текущие значения конфигурации на валидность, в случае успеха перезапустить сервис с новыми настройками, в случае исключения логировать ошибку в консоль.  
-*Столкнулся с проблемой, что событие срабатывает дважды при изменении настроек, подробнее о проблеме (https://github.com/dotnet/aspnetcore/issues/2542). Двойной регистрации и т.п. не было, проверял дебагером, потому поставил временное ограничение между последним обновлением и следующим.
+Сервис на старте загружает конфигурацию и подписывается на изменения конфигурации. Если происходит изменение - конфигурация обновляется, сервис перезапускается.
+```csharp
+private readonly IOptionsMonitor<FileWatcherConfiguration> _configurationMonitor;
+private FileWatcherService _service = null!;
+
+public FileWatcherConfigurator(
+    IOptionsMonitor<FileWatcherConfiguration> configurationMonitor)
+{
+    _configurationMonitor = configurationMonitor;
+}
+
+public void ConfigureService(FileWatcherService service)
+{
+    _service = service;
+    LoadConfiguration();
+    _configurationMonitor.OnChange((_,_) => ReloadConfiguration());
+}
+```
+Метод вызывает загрузку конфигурации, в случае успеха перезапускает сервис с обновлёнными данными, иначе загрузчик отлогирует об ошибках. Код метода LoadConfiguration смотреть в классе FileWatcherConfigurator.    
+*_lastConfigurationChange помогает с проблемой многократного срабатывания OnChange события при изменении настроек, подробнее о проблеме (https://github.com/dotnet/aspnetcore/issues/2542). Многократной подписки и т.п. не было, проверял дебагером, потому поставил секундную задержку перед следующим выполнением.
 ```csharp
 private DateTime _lastConfigurationChange = DateTime.MinValue; 
 
-private async Task ReloadConfig()
+private void ReloadConfiguration()
 {
     if (DateTime.Now - _lastConfigurationChange >= TimeSpan.FromSeconds(1))
     {
         _lastConfigurationChange = DateTime.Now;
-            
+
         var token = new CancellationToken();
-
-        if(_isRunning) 
-            await StopAsync(token);
-        
-        LoadConfig();
-
-        if (_validated)
+        if (_service.IsRunning) _service.StopAsync(token);
+        LoadConfiguration();
+        if (_service.IsConfigurationValid)
         {
             _logger.LogInformation("Конфигурация успешно обновлена, перезапуск сервиса...");
-            await StartAsync(token);
+            _service.StartAsync(token);
         }
     }
 }
-
-private void LoadConfig()
-{
-    try
-    {
-        _logger.LogInformation("Загрузка конфигурации...");
-        var exceptions = new List<Exception>();
-        var validationResult = _validator.Validate(_configurationMonitor.CurrentValue);
-        _validated = validationResult is {IsPathValid: true, IsCronValid: true};
-        
-        if (!validationResult.IsPathValid)
-            exceptions.Add(new DirectoryNotFoundException(
-                $"Папки '{_configurationMonitor.CurrentValue.Path}' не существует"));
-
-        if (!validationResult.IsCronValid)
-            exceptions.Add(new ArgumentException(
-                $"Ошибка в cron выражении '{_configurationMonitor.CurrentValue.Cron}'"));
-
-        if (exceptions.Any())
-            throw new AggregateException("Ошибка валидации:", exceptions);
-        
-        _watchPath = IoUtils.GetOsIndependentPath(_configurationMonitor.CurrentValue.Path);
-        _cronExpression = CronExpression.Parse(_configurationMonitor.CurrentValue.Cron);
-    }
-    catch (Exception ex)
-    {
-        _logger.LogError(ex, 
-            "Ошибка при загрузке конфигурации FileWatcherService, сервис ожидает обновления конфигурации");
-    }
-}
 ```
+Пример обновления с корректной и некорректной конфигурацией:
+![](https://sun9-14.userapi.com/impg/Bep9Ur7iE8eoh4GV16ZKDDlk6YaYXs-2tYcc0g/7FWhrXumE5g.jpg?size=1183x623&quality=96&sign=96f436531beca30e9663d7224f1ff0d9&type=album)
 ## Реализация логирования с помощью ILogger  
 
-Пример объявления, очищаем хост от всех реализаций с помощью ClearProviders() и добавляем логирование в консоль AddConsole().  
+Пример объявления, очищаем хост от всех реализаций с помощью ClearProviders() и добавляем логирование в консоль, используем SimpleConsole для настройки вывода времени логирования, т.к. у Console эта опция помечена как устаревшая.  
 ```csharp
 var host = new HostBuilder()
     .ConfigureLogging(logging =>
     {
         logging.ClearProviders();
-        logging.AddConsole();
+        logging.AddSimpleConsole(options => 
+            options.TimestampFormat = "[yyyy-MM-dd HH:mm:ss] ");
     })
     .ConfigureAppConfiguration((_, config) =>
     {
@@ -422,5 +383,40 @@ public sealed class FileWatcherService : IHostedService
     }
 }
 ```  
-Пример обновления с корректной и некорректной конфигурацией:
-![](https://sun9-68.userapi.com/impg/TNGvXbRoT3G5Alv5lXwmV5Z0l_skBE54i7h1Lw/7lcwSikrJXE.jpg?size=1019x869&quality=96&sign=b3a609d2fa9a0ad14d0271e8fe4ce13f&type=album)
+## Контейнеризация приложения  
+FileWatcherService работает с Windows API, потому при Linux контейнеризации приложение запустить можно, но уведомления получать нельзя. На сцену выходят Windows контейнеры :)  
+Открываем Powershell и пишем:
+```powershell
+& $Env:ProgramFiles\Docker\Docker\DockerCli.exe -SwitchDaemon .
+```  
+Теперь у докера есть возможность переключиться на Windows контейнеры.  
+![](https://sun9-45.userapi.com/impg/7VHzddwshwjEN2oBr4Ka5mZ6UvEKwVgqCJr1QQ/RAl8daD09UA.jpg?size=294x422&quality=96&sign=143d590c47067cd1afc37296a581ec81&type=album)  
+Теперь возвращаемся в Powershell, вводим и готовимся к перезагрузке
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName $("Microsoft-Hyper-V", "Containers") -All
+```  
+После перезагрузки созадём изображение нашего приложения и...  
+Теперь надо привязать диск, который мы хотим просматривать, предположим это будут документы
+```powershell
+-v <Путь на локальной машине>:<Закрепляем место в контейнере>
+# пример
+-v C:\Users\karma\Documents:C:\APP\DOCUMENTS
+```  
+Теперь если в конфигурации указать "Path": "C:\APP\DOCUMENTS", то мы можем просматривать изменения на локальной машине.  
+![](https://sun9-28.userapi.com/impg/u2H-QBAdYJrUv82yXC73RJYjgDnxC-5awB990A/F6Dh1J4BhS4.jpg?size=633x211&quality=96&sign=38db3791e9f9306a7382f75db21e424a&type=album)  
+Но, есть но, контейнер не отслеживает события по не привязанным к нему файлам, а это значит, что даже удалив appsettings.json ничего не изменится, но мы ведь хотим менять конфигурацию. Для этого в коде укажите вложенную папку для файла конфигурации, учитывая особенности OS внутри контейнера.  
+```csharp
+.ConfigureAppConfiguration((_, config) =>
+    {
+        config
+        --> .SetBasePath("C:\\app\\config") <--
+            .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+    })
+```  
+Теперь нужно привязать директорию, из которой мы хотим менять наш файл конфигурации.
+```powershell
+-v C:\Users\karma\Documents\Config:C:\APP\CONFIG
+```  
+Результат:
+![](https://sun9-24.userapi.com/impg/pNJXPBHix9S30SZIE7rC83F6BO_mVXZONHe29A/8wWk3bNY0uM.jpg?size=1126x262&quality=96&sign=9caf1696823da8ec26ba2780a21b29ed&type=album)  
+*В начале закреплена запись работы приложения.

@@ -1,10 +1,11 @@
 ﻿using Microsoft.Extensions.Logging;
 
-namespace FolderWatcher.Storage;
+namespace FolderWatcher.Helpers;
 
 public sealed class FileWatcherStorage
 {
     private readonly ILogger<FileWatcherStorage> _logger;
+    
     private HashSet<string> _created;
     private HashSet<string> _changed;
     private HashSet<string> _deleted;
@@ -20,6 +21,13 @@ public sealed class FileWatcherStorage
     public void AddCreated(string filePath) => _created.Add(filePath);
     public void AddChanged(string filePath) => _changed.Add(filePath);
     public void AddDeleted(string filePath) => _deleted.Add(filePath);
+    
+    /// <summary>
+    /// Удаляем старое название из списка, добавляем новое.
+    /// Для поддержания актуальности списка.
+    /// </summary>
+    /// <param name="oldPath">Путь до переименования</param>
+    /// <param name="newPath">Путь после переименования</param>
     public void UpdateAfterRenaming(string oldPath, string newPath)
     {
         if (_created.Contains(oldPath))
@@ -35,31 +43,26 @@ public sealed class FileWatcherStorage
         }
     }
 
-    public void WriteAllChanges()
+    /// <summary>
+    /// Вывод всех изменений текущей сессии.
+    /// Очищаем списки после вывода с помощью new(), чтобы обновить Capacity.
+    /// </summary>
+    public void LogAllChanges()
     {
-        CheckData(); // удалить, если нужен вывод без проверки.
-        
-        if(_created.Any()) 
+        if(_created.Any())
+        {
             _logger.LogInformation("Добавленные файлы:\n{Arr}", string.Join('\n', _created));
-        if(_changed.Any()) 
+            _created = new HashSet<string>();
+        }
+        if(_changed.Any())
+        {
             _logger.LogInformation("Обновленные файлы:\n{Arr}", string.Join('\n', _changed));
-        if(_deleted.Any()) 
+            _changed = new HashSet<string>();
+        }
+        if(_deleted.Any())
+        {
             _logger.LogInformation("Удаленные файлы:\n{Arr}", string.Join('\n', _deleted));
-        
-        // Очищаем списки, после вывода, не использую Clear(),
-        // т.к. Capacity остаётся прежней и списки после нескольких итераций записи могут занимать слишком много памяти.
-        _created = new HashSet<string>();
-        _changed = new HashSet<string>();
-        _deleted = new HashSet<string>();
-    }
-
-    private void CheckData()
-    {
-        // проверяем, что созданные файлы существуют.
-        _created = _created.Where(Path.Exists).ToHashSet();
-        // проверяем, что изменённые файлы существуют.
-        _changed = _changed.Where(Path.Exists).ToHashSet();
-        // проверяем, что файлы действительн удалены.
-        _deleted = _deleted.Where(path => !Path.Exists(path)).ToHashSet();
+            _deleted = new HashSet<string>();
+        }
     }
 }

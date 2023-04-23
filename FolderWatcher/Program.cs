@@ -1,6 +1,6 @@
 ﻿using FolderWatcher.BackgroundServices;
-using FolderWatcher.Storage;
-using FolderWatcher.Utils;
+using FolderWatcher.Configuration;
+using FolderWatcher.Helpers;
 using FolderWatcher.Validation;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -11,17 +11,21 @@ var host = new HostBuilder()
     .ConfigureLogging(logging =>
     {
         logging.ClearProviders();
-        logging.AddConsole();
+        logging.AddSimpleConsole(options => 
+            options.TimestampFormat = "[yyyy-MM-dd HH:mm:ss] ");
     })
     .ConfigureAppConfiguration((_, config) =>
     {
-        config.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+        config
+            .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
     })
     .ConfigureServices((context, services) =>
     {
         services.Configure<FileWatcherConfiguration>(context.Configuration);
+        services.AddSingleton<FileWatcherValidator>();
+        services.AddSingleton<FileWatcherConfigurator>();
         services.AddSingleton<FileWatcherStorage>();
-        services.AddSingleton<ConfigurationValidator>();
+        services.AddSingleton<FileWatcherFactory>();
         services.AddHostedService<GlobalExceptionHandlerService>();
         services.AddHostedService<FileWatcherService>();
     })
