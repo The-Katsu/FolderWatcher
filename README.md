@@ -197,16 +197,20 @@ private void OnFileCreated(object sender, FileSystemEventArgs e)
 ## Установка периода времени с помощью cron-выражений  
 Создадим класс для работы с cron выражениями, нам нужно получать 2 значения:  
 * Когда следующий вызов.
-* Находится ли следующий вызов в интервале уже.  
+* Находится ли следующий вызов в интервале уже.   
+
 Идея такова, т.к. минимальный интервал выполнения cron-выражений - 1 минута (* * * * *), тогда если между текущем временем и следующим вызовом 1 минута или меньше, то приложение находится в интервале времени.  
 Выражения работают в соответствии с локальным временем, а парсятся в соответствии с utc, потому вычисляем разницу и добавляем при поиске получении следующего вызова.
 ```csharp
 public static class CronUtils
 {
-    var prev = cron
+    public static bool CheckInterval(CronExpression cron, DateTime next)
+    {
+        var prev = cron
             .GetOccurrences(DateTime.UtcNow.AddHours(-1), next.AddMicroseconds(-1))
             .LastOrDefault(DateTime.MinValue);
         return next - prev <= TimeSpan.FromMinutes(1);
+    }
 
     public static DateTime GetNextOccurrence(CronExpression cron)
     {
@@ -288,7 +292,7 @@ public sealed class FileWatcherService : IHostedService
     }
 }
 ```
-Конфигуратор получает из конструктора IOptionsMonitor с нашей конфигурацией, загружает конфигурацию и подписывается на изменения конфигурации. Если происходит изменение - конфигурация обновляется, сервис перезапускается(в случае валидной конфигурации, отлогирует ошибку).
+Конфигуратор получает из конструктора IOptionsMonitor с нашей конфигурацией, загружает конфигурацию и подписывается на изменения конфигурации. Если происходит изменение - конфигурация обновляется, сервис перезапускается(в случае невалидной конфигурации, отлогирует ошибку).
 ```csharp
 private readonly IOptionsMonitor<FileWatcherConfiguration> _configurationMonitor;
 private FileWatcherService _service = null!;
@@ -307,7 +311,7 @@ public void ConfigureService(FileWatcherService service)
 }
 ```
 Метод вызывает загрузку конфигурации, в случае успеха перезапускает сервис с обновлёнными данными, иначе загрузчик отлогирует об ошибках. Код метода LoadConfiguration смотреть в классе FileWatcherConfigurator.    
-*_lastConfigurationChange помогает с проблемой многократного срабатывания OnChange события при изменении настроек, подробнее о проблеме (https://github.com/dotnet/aspnetcore/issues/2542). Многократной подписки и т.п. не было, проверял дебагером, потому поставил задержку в 2 секунды перед следующим обновлением.
+*_lastConfigurationChange помогает с проблемой многократного срабатывания OnChange события при изменении настроек, подробнее о проблеме (https://github.com/dotnet/aspnetcore/issues/2542 или https://stackoverflow.com/questions/75257352/double-call-of-onchange-callback-happening-first-detection-of-change-by-ioptionm). Ставим задержу перед следующим выполнением для пропуска многократного срабатывания.
 ```csharp
 private DateTime _lastConfigurationChange = DateTime.MinValue; 
 
