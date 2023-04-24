@@ -4,7 +4,7 @@ using FolderWatcher.Utils;
 
 namespace FolderWatcher.Validation;
 
-public sealed class FileWatcherValidator
+public class FileWatcherValidator
 {
     private List<Exception> _exceptions = null!;
     

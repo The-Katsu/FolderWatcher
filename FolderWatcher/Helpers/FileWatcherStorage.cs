@@ -2,7 +2,7 @@
 
 namespace FolderWatcher.Helpers;
 
-public sealed class FileWatcherStorage
+public class FileWatcherStorage
 {
     private readonly ILogger<FileWatcherStorage> _logger;
     

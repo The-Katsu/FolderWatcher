@@ -1,7 +1,7 @@
 ## Необходимо реализовать background сервис, который будет следить за папкой на диске и регистрировать все изменения, производимые в этой папке.  
 
 ---  
-Задача реализована с помощью HostedService для background service (FileWatcherService), IOptionsMonitor для обновления конфигурации, ILogger для логирования, Cronos для разбора cron-выражений.    
+Задача реализована как консольное приложение на dotnet 7 с помощью HostedServices для background сервисов, IOptionsMonitor для обновления конфигурации, ILogger для логирования, Cronos для разбора cron-выражений.    
 Приложение развёрнуто и работает в Docker контейнере.  
 Смотреть запись работы приложения - https://disk.yandex.ru/i/yzl0JYKFVkRe8A
 
@@ -17,6 +17,9 @@
 - [Реализовать возможность изменения настроек без необходимости перезапуска приложения](#изменение-настроек-без-перезапуска-приложения)
 - [Реализовать логирование в приложении с помощью стандартного механизма ILogger](#реализация-логирования-с-помощью-ilogger)  
 - [Завернуть решение в docker](#контейнеризация-приложения)
+    - [Пример мониторинга папки в контейнера](#мониторинг-папки-в-контейнера)
+    - [Пример перезапуска сервиса при изменении файла конфигурации в контейнере](#перезапуск-сервиса-при-изменения-файла-конфигурации-из-контейнера)
+    - [Пример периодического отслеживания с cron выражения в контейнере](#периодическое-выполнение-учитывая-cron-выражения-в-контейнере)
 ___
 
 ## Поддержка windows и linux-style путей
@@ -29,8 +32,6 @@ public static class IoUtils
         path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, path);
         return Path.GetFullPath(path);
     }
-
-    // код
 }
 ```
 
@@ -50,11 +51,11 @@ public Task StartAsync(CancellationToken cancellationToken)
     try
     {
         _logger.LogInformation(
-            "Запуск сервиса... Ожидаем рабочий период времени учитывая cron '{Cron}' ...", Configuration.Cron);
+            "Запуск сервиса...");
     }
     catch (Exception ex)
     {
-        _logger.LogError(ex, "Ошибка во время запуска FileWatcherService, попробуйте обновить конфигурацию");
+        _logger.LogError(ex, "Ошибка Х:");
     }
     return Task.CompletedTask;
 }
@@ -107,7 +108,15 @@ var host = new HostBuilder()
 
 С помощью метода AddJsonFile добавляем JSON-файл "appsettings.json" в конфигурацию приложения.  
 Параметр optional установлен в значение false, что означает, что если файл не найден, то будет выброшено исключение.   
-Параметр reloadOnChange установлен в значение true, что означает, что при изменении файла, конфигурация будет автоматически перезагружена.
+Параметр reloadOnChange установлен в значение true, что означает, что при изменении файла, конфигурация будет автоматически перезагружена.  
+Оба параметра являются строковыми значениями.  
+Пример appsettings.json файла:
+```json
+{
+  "Path": "C:\\Users\\USER\\Documents",
+  "Cron": "* * * * *"
+}
+```
 
 ## Список изменений по завершению работы.  
 
@@ -116,7 +125,7 @@ var host = new HostBuilder()
 Очищаем коллекции после вывода, присваивая им новую пустую коллекцию, т.к. Clear() сохраняет прежнюю Capacity (не вызывает TrimExcess()).
 
 ```csharp
-public sealed class FileWatcherStorage
+public class FileWatcherStorage
 {
     private readonly ILogger<FileWatcherStorage> _logger;
     
@@ -206,7 +215,7 @@ public static class CronUtils
     }
 }
 ```
-Теперь мы создаём создаём таймер и подбираем ему стартовый интервал, если следующий вызов уже находится в интервале то мы стартуем без задержек, иначе ждём. 
+Теперь мы создаём создаём таймер и подбираем ему стартовый интервал, если следующий вызов уже находится в интервале то мы стартуем без задержек, иначе ждём. Решение заключается в том, что мы останавливаем наблюдателя каждый раз при выходе за интервал работы и включаем при попадании в интервал, переключая флаг EnableRaisingEvents.  
 ```csharp
 // Инициализируем наблюдателя
 _fileWatcher = new FileSystemWatcher(_configuration.Path);
@@ -259,38 +268,27 @@ public class FileWatcherConfiguration
 Зарегистрируем класс в сервисах как TOptions.
 ```csharp
 var host = new HostBuilder()
-    .ConfigureLogging(logging =>
-    {
-        // кофигурация логера
-    })
     .ConfigureAppConfiguration((_, config) =>
     {
-        config.AddJsonFile(
-            "appsettings.json", 
-            optional: false, 
-            reloadOnChange: true);
+        config.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
     })
     .ConfigureServices((context, services) =>
     {
         services.Configure<FileWatcherConfiguration>(context.Configuration);
-        // остальные сервисы
     })
     .Build();
 ```
-Создадим класс (подробнее смотреть класс FileWatcherConfigurator), который будет ответственен за конфигурацию сервиса и создадим метод для применения конфигурации.
+Создадим класс, ответственный за конфигурацию сервиса, создадим метод Configure и передадим в конструктор сервиса, который запустит конфигурацию приложения. Подробнее смотреть класс FileWatcherConfigurator.
 ```csharp
 public sealed class FileWatcherService : IHostedService
 {
-    public FileWatcherService(
-        FileWatcherConfigurator configurator)
+    public FileWatcherService(FileWatcherConfigurator configurator)
     {
         configurator.ConfigureService(this);
     }
-
-    //код
 }
 ```
-Сервис на старте загружает конфигурацию и подписывается на изменения конфигурации. Если происходит изменение - конфигурация обновляется, сервис перезапускается.
+Конфигуратор получает из конструктора IOptionsMonitor с нашей конфигурацией, загружает конфигурацию и подписывается на изменения конфигурации. Если происходит изменение - конфигурация обновляется, сервис перезапускается(в случае валидной конфигурации, отлогирует ошибку).
 ```csharp
 private readonly IOptionsMonitor<FileWatcherConfiguration> _configurationMonitor;
 private FileWatcherService _service = null!;
@@ -309,7 +307,7 @@ public void ConfigureService(FileWatcherService service)
 }
 ```
 Метод вызывает загрузку конфигурации, в случае успеха перезапускает сервис с обновлёнными данными, иначе загрузчик отлогирует об ошибках. Код метода LoadConfiguration смотреть в классе FileWatcherConfigurator.    
-*_lastConfigurationChange помогает с проблемой многократного срабатывания OnChange события при изменении настроек, подробнее о проблеме (https://github.com/dotnet/aspnetcore/issues/2542). Многократной подписки и т.п. не было, проверял дебагером, потому поставил задержку в 2 секунды перед следующим выполнением.
+*_lastConfigurationChange помогает с проблемой многократного срабатывания OnChange события при изменении настроек, подробнее о проблеме (https://github.com/dotnet/aspnetcore/issues/2542). Многократной подписки и т.п. не было, проверял дебагером, потому поставил задержку в 2 секунды перед следующим обновлением.
 ```csharp
 private DateTime _lastConfigurationChange = DateTime.MinValue; 
 
@@ -330,7 +328,7 @@ private void ReloadConfiguration()
     }
 }
 ```
-Пример обновления, запускаем с корректной конфигурацией, затем делаем ошибку в пути и в крон выржаении, получаем список из 2 ошибок (приложение всё ещё работает и ожидает обновления конфигурации), вводим корректную конфигурацию и сервис запускает наблюдателя:
+Пример обновления, запускаем с корректной конфигурацией, затем допускаем ошибку в пути и в cron выражении, получаем список из 2 ошибок (приложение всё ещё работает и ожидает обновления конфигурации), вводим корректную конфигурацию и сервис запускает наблюдателя:
 ![](https://sun9-61.userapi.com/impg/28QxzBduFsHNFmwnKNZjWx7ESeTO6C8Gji0q8A/MCDLQMsPRss.jpg?size=1422x712&quality=96&sign=77f15f62952c1611b4348e3919edebb0&type=album)
 ## Реализация логирования с помощью ILogger  
 
@@ -392,15 +390,19 @@ FileWatcherService работает с Windows API, потому при Linux к
 ```powershell
 Enable-WindowsOptionalFeature -Online -FeatureName $("Microsoft-Hyper-V", "Containers") -All
 ```  
-После перезагрузки созадём изображение нашего приложения и...  
-Теперь надо привязать диск, который мы хотим просматривать, предположим это будут документы
+## Мониторинг папки в контейнера
+После перезагрузки создаём изображение нашего приложения и...  
+Теперь надо привязать папку, которую мы хотим просматривать, предположим это будут документы
 ```powershell
 -v <Путь на локальной машине>:<Закрепляем место в контейнере>
 # пример
 -v C:\Users\karma\Documents:C:\APP\DOCUMENTS
 ```  
-Теперь если в конфигурации указать "Path": "C:\APP\DOCUMENTS", то мы можем просматривать изменения на локальной машине.  
-![](https://sun9-28.userapi.com/impg/u2H-QBAdYJrUv82yXC73RJYjgDnxC-5awB990A/F6Dh1J4BhS4.jpg?size=633x211&quality=96&sign=38db3791e9f9306a7382f75db21e424a&type=album)  
+Теперь если в конфигурации указать "Path": "C:\APP\DOCUMENTS", то мы можем просматривать изменения на локальной машине (в данном случае просматриваем "C:\Users\user\Documents"), контейнеру доступны все подпапки привязанной директории, потому мы можем устанавливать контроль за любой конкретной папкой изменив настройки.  
+Пример наблюдения за C:\APP\DOCUMENTS.  
+![](https://sun9-79.userapi.com/impg/YCf0hTrKJVemzLzy3V1GTtRelYGP-sva1XNhCg/kr7O22bw8x4.jpg?size=679x257&quality=96&sign=4459d813e7ded9b4b6c53d10f4dee3b1&type=album)  
+
+## Перезапуск сервиса, при изменения файла конфигурации из контейнера
 Но, есть но, контейнер не отслеживает события по не привязанным к нему файлам, а это значит, что даже удалив appsettings.json ничего не изменится, но мы ведь хотим менять конфигурацию. Для этого в коде укажите вложенную папку для файла конфигурации, учитывая особенности OS внутри контейнера.  
 ```csharp
 .ConfigureAppConfiguration((_, config) =>
@@ -415,5 +417,8 @@ Enable-WindowsOptionalFeature -Online -FeatureName $("Microsoft-Hyper-V", "Conta
 -v C:\Users\karma\Documents\Config:C:\APP\CONFIG
 ```  
 Пример работы приложения можно посмотреть в начале в виде записи экрана.  
+Пример работы с папками вложенного уровня. Запускаемся с неподходящим временем (в 17:49, но интервал cron стоит для 10-20 минут), потому меняет выражение, сервис перезапускается с новой конфигурацией, затем вносим изменения в папке, получаем уведомления. Теперь изменим конфигурацию ещё раз, сервис остановился, мы общую информацию о сделанных изменениях и перешли в новую директорию для просмотра, сделали и сделали там пару изменений.  
+![](https://sun9-65.userapi.com/impg/0aIuAyc_fgNzVegDNkVeuktdScz5URe6_wT7lA/qJ8wOeCWCNE.jpg?size=628x833&quality=96&sign=0ca85e32b023bfb5279a32686a5c272c&type=album)    
+## Периодическое выполнение, учитывая cron выражения в контейнере.
 Прикладываю скриншот работы приложения для интервала ' 30-35,40-45 * * * * ' - каждый час с 30 по 35 и с 40 по 45 минуту, после того как сервис остановится после 45 минуты после того, как сервис приостановится на 45 минуте - остановим контейнер и посмотрим вывод всех изменений.  
 ![](https://sun9-34.userapi.com/impg/iR6h8I8Jk4Us4VTqC_N9Ma2t4n--aVgOfKl3Ig/FagygXysOyc.jpg?size=773x864&quality=96&sign=8ee2e2a06a157024dfff7c6e697ae19b&type=album)  
