@@ -41,7 +41,7 @@ public sealed class FileWatcherService : IHostedService
             if (!IsConfigurationValid) return Task.CompletedTask;
             
             _logger.LogInformation(
-                "Запуск сервиса... Ожидаем рабочий период времени учитывая cron '{Cron}' ...", Configuration.Cron);
+                "Запуск сервиса... Ожидаем рабочий интервал времени для выражения '{Cron}' ...", Configuration.Cron);
             _factory.CreateWatcher(Configuration);
         }
         catch (Exception ex)

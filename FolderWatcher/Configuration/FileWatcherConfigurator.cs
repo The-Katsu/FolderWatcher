@@ -66,7 +66,7 @@ public class FileWatcherConfigurator
     {
         // Предотвращение многократного срабатывания, подробнее в README
         // Ссылка на проблему https://github.com/dotnet/aspnetcore/issues/2542
-        if (DateTime.Now - _lastConfigurationChange >= TimeSpan.FromSeconds(1))
+        if (DateTime.Now - _lastConfigurationChange >= TimeSpan.FromSeconds(2))
         {
             _lastConfigurationChange = DateTime.Now;
 

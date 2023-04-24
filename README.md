@@ -3,7 +3,7 @@
 ---  
 Задача реализована с помощью HostedService для background service (FileWatcherService), IOptionsMonitor для обновления конфигурации, ILogger для логирования, Cronos для разбора cron-выражений.    
 Приложение развёрнуто и работает в Docker контейнере.  
-Смотреть запись работы приложения - https://disk.yandex.ru/i/QwS-ZUNvOdzcNQ
+Смотреть запись работы приложения - https://disk.yandex.ru/i/yzl0JYKFVkRe8A
 
 ## Требования
 - [Поддержка windows и linux-style путей](#поддержка-windows-и-linux-style-путей)
@@ -186,65 +186,65 @@ private void OnFileCreated(object sender, FileSystemEventArgs e)
 ---
 
 ## Установка периода времени с помощью cron-выражений  
-Для корректной работы используйте интервалы пример - (* 8-18 * * 1-5):(понедельник-пятница с 8 до 18). Т.к. cron-выражения задают период выполнения, а не интервал работы. По условию нам необходимы именно интервалы, как и для работы с FileSystemWatcher (т.к. работает на ивентах и необходима подписка для отслеживания изменений), потому берём первый и последний запланированный запуск и задаём интервал между ними.  
-Конечно можно запустить Quartz или Hangfire с cron-выражением, но опять же нам нужен интервал, а не период.
+Создадим класс для работы с cron выражениями, нам нужно получать 2 значения:  
+* Когда следующий вызов.
+* Находится ли следующий вызов в интервале уже.  
+Идея такова, т.к. минимальный интервал выполнения cron-выражений - 1 минута (* * * * *), тогда если между текущем временем и следующим вызовом 1 минута или меньше, то приложение находится в интервале времени.  
+Выражения работают в соответствии с локальным временем, а парсятся в соответствии с utc, потому вычисляем разницу и добавляем при поиске получении следующего вызова.
 ```csharp
 public static class CronUtils
 {
-    public static DateTime GetFirstOccurrenceOfTheDay(CronExpression cron) =>
-        cron
-            .GetOccurrences(DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1))
-            .FirstOrDefault(x => x.Day == DateTime.Today.Day, DateTime.MinValue);
-    
-    public static DateTime GetLastOccurrenceOfTheDay(CronExpression cron) =>
-        cron
-            .GetOccurrences(DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddDays(1))
-            .LastOrDefault(x => x.Day == DateTime.Today.Day, DateTime.MinValue);
+    var prev = cron
+            .GetOccurrences(DateTime.UtcNow.AddHours(-1), next.AddMicroseconds(-1))
+            .LastOrDefault(DateTime.MinValue);
+        return next - prev <= TimeSpan.FromMinutes(1);
+
+    public static DateTime GetNextOccurrence(CronExpression cron)
+    {
+        var utcOffset = DateTime.Now - DateTime.UtcNow;
+        return cron.GetNextOccurrence(DateTime.UtcNow.AddTicks(utcOffset.Ticks))!.Value;
+    }
 }
 ```
-После этого запускаем таймер и настраиваем временные рамки так, что сервис не будет получать события, если время выполнения не соответствует временным рамкам из конфигурации.
+Теперь мы создаём создаём таймер и подбираем ему стартовый интервал, если следующий вызов уже находится в интервале то мы стартуем без задержек, иначе ждём. 
 ```csharp
 // Инициализируем наблюдателя
 _fileWatcher = new FileSystemWatcher(_configuration.Path);
-_fileWatcher.IncludeSubdirectories = true;
-_fileWatcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite;
-_fileWatcher.Created += OnChanged;
-_fileWatcher.Changed += OnChanged;
-_fileWatcher.Deleted += OnChanged;
-_fileWatcher.Renamed += OnRenamed;
 
+// настройка наблюдателя...
+
+// создаём таймер
 _timer = new System.Timers.Timer();
 var isWatching = false;
 var cronExpression = CronExpression.Parse(_configuration.Cron);
-_timer.Interval = 1; // Для первого старта без задержек
-_timer.AutoReset = true; // Держим таймер активным для проверки периода
+var now = DateTime.Now;
+var next = CronUtils.GetNextOccurrence(cronExpression);
+var delay = next - now;
+_timer.Interval = CronUtils.CheckInterval(cronExpression, next) ? 1 : delay.TotalMilliseconds;
 _timer.Elapsed += (_,_) =>
 {
-    _timer.Interval = 30000; // 30 секунд, успеть в минимальный интервал * * * * * (каждую минуту) 
-    var start = CronUtils.GetFirstOccurrenceOfTheDay(cronExpression);
-    var end = CronUtils.GetLastOccurrenceOfTheDay(cronExpression);
-    var now = DateTime.Now;
-    if (now >= start && now <= end && !isWatching) 
+    now = DateTime.Now;
+    next = CronUtils.GetNextOccurrence(cronExpression);
+    delay = next - now;
+    _timer.Interval = delay.Milliseconds;
+    if (delay <= TimeSpan.FromMinutes(1) && !isWatching)
     {
-        _logger.LogInformation(
-            "Запущен просмотр папки '{WatchPath}', {Date} в период {Start} : {End}...", 
-            _configuration.Path, now.ToString("d"), start.ToString("t"), end.ToString("t"));
+        _logger.LogInformation("Запущен просмотр папки '{WatchPath}'...", _configuration.Path);
         isWatching = true;
         _fileWatcher.EnableRaisingEvents = true;
     }
-    else if ((now < start || now > end) && isWatching)
+    else if (delay > TimeSpan.FromMinutes(1) && isWatching)
     {
-        _logger.LogInformation(
-            "Просмотр папки '{WatchPath}' приостановлен до следующего периода...", _configuration.Path);
+        _logger.LogInformation("Просмотр папки '{WatchPath}' приостановлен до {Next}...", 
+            _configuration.Path, next.ToString("g"));
         isWatching = false;
         _fileWatcher.EnableRaisingEvents = false;
-        _storage.LogAllChanges();
     }
 };
-_timer.Start();
+_timer.Enabled = true;
 ```  
-Пример работы для выражения ' 20 16-17 22 1-6 6 ' (каждую 20 минуту с 16 по 17 часы 22 числа в месяцы с 1 по 6 по субботам)  
-![](https://sun9-41.userapi.com/impg/CYR7d-mxbdyT_PAMLfSy0xtiv9Np42qcoK-OjQ/4CqLG84mOmw.jpg?size=826x692&quality=96&sign=1a7ef12533dcbd50fbcbb17d379a325a&type=album)
+Пример работы для выражения ' 25-30,35-40 12 * * * ' (каждый 12 час с 25 по 30 минуту и с 35 по 40 минуту). Запускаем в 12:27, попадаем в интервал и сразу запускаем наблюдатель, затем работа остановится в 30 минуту и начнётся с 35 по 40 минуты.    
+![](https://sun9-79.userapi.com/impg/Ea_DEBuNf5kFZEpCgoDvGSMkxZpc5gIrjY94vQ/W_in6dRRmRc.jpg?size=824x748&quality=96&sign=f8f59274cf30c17ed92e570af4490b8e&type=album)
 
 ## Изменение настроек без перезапуска приложения  
 
@@ -309,13 +309,13 @@ public void ConfigureService(FileWatcherService service)
 }
 ```
 Метод вызывает загрузку конфигурации, в случае успеха перезапускает сервис с обновлёнными данными, иначе загрузчик отлогирует об ошибках. Код метода LoadConfiguration смотреть в классе FileWatcherConfigurator.    
-*_lastConfigurationChange помогает с проблемой многократного срабатывания OnChange события при изменении настроек, подробнее о проблеме (https://github.com/dotnet/aspnetcore/issues/2542). Многократной подписки и т.п. не было, проверял дебагером, потому поставил секундную задержку перед следующим выполнением.
+*_lastConfigurationChange помогает с проблемой многократного срабатывания OnChange события при изменении настроек, подробнее о проблеме (https://github.com/dotnet/aspnetcore/issues/2542). Многократной подписки и т.п. не было, проверял дебагером, потому поставил задержку в 2 секунды перед следующим выполнением.
 ```csharp
 private DateTime _lastConfigurationChange = DateTime.MinValue; 
 
 private void ReloadConfiguration()
 {
-    if (DateTime.Now - _lastConfigurationChange >= TimeSpan.FromSeconds(1))
+    if (DateTime.Now - _lastConfigurationChange >= TimeSpan.FromSeconds(2))
     {
         _lastConfigurationChange = DateTime.Now;
 
@@ -330,8 +330,8 @@ private void ReloadConfiguration()
     }
 }
 ```
-Пример обновления с корректной и некорректной конфигурацией:
-![](https://sun9-14.userapi.com/impg/Bep9Ur7iE8eoh4GV16ZKDDlk6YaYXs-2tYcc0g/7FWhrXumE5g.jpg?size=1183x623&quality=96&sign=96f436531beca30e9663d7224f1ff0d9&type=album)
+Пример обновления, запускаем с корректной конфигурацией, затем делаем ошибку в пути и в крон выржаении, получаем список из 2 ошибок (приложение всё ещё работает и ожидает обновления конфигурации), вводим корректную конфигурацию и сервис запускает наблюдателя:
+![](https://sun9-61.userapi.com/impg/28QxzBduFsHNFmwnKNZjWx7ESeTO6C8Gji0q8A/MCDLQMsPRss.jpg?size=1422x712&quality=96&sign=77f15f62952c1611b4348e3919edebb0&type=album)
 ## Реализация логирования с помощью ILogger  
 
 Пример объявления, очищаем хост от всех реализаций с помощью ClearProviders() и добавляем логирование в консоль, используем SimpleConsole для настройки вывода времени логирования, т.к. у Console эта опция помечена как устаревшая.  
@@ -366,20 +366,17 @@ public sealed class FileWatcherService : IHostedService
         _logger = logger;
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public  Task StartAsync(CancellationToken cancellationToken)
     {
-        await Task.Run(() =>
+        try
         {
-            try
-            {
-                _logger.LogInformation("Запуск сервиса...");
-                // код
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Ошибка во время запуска FileWatcherService");
-            }
-        }, cancellationToken);
+            _logger.LogInformation("Запуск сервиса...");
+            // код
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка во время запуска FileWatcherService");
+        }
     }
 }
 ```  
@@ -417,6 +414,6 @@ Enable-WindowsOptionalFeature -Online -FeatureName $("Microsoft-Hyper-V", "Conta
 ```powershell
 -v C:\Users\karma\Documents\Config:C:\APP\CONFIG
 ```  
-Результат:
-![](https://sun9-24.userapi.com/impg/pNJXPBHix9S30SZIE7rC83F6BO_mVXZONHe29A/8wWk3bNY0uM.jpg?size=1126x262&quality=96&sign=9caf1696823da8ec26ba2780a21b29ed&type=album)  
-*В начале закреплена запись работы приложения.
+Пример работы приложения можно посмотреть в начале в виде записи экрана.  
+Прикладываю скриншот работы приложения для интервала ' 30-35,40-45 * * * * ' - каждый час с 30 по 35 и с 40 по 45 минуту, после того как сервис остановится после 45 минуты после того, как сервис приостановится на 45 минуте - остановим контейнер и посмотрим вывод всех изменений.  
+![](https://sun9-34.userapi.com/impg/iR6h8I8Jk4Us4VTqC_N9Ma2t4n--aVgOfKl3Ig/FagygXysOyc.jpg?size=773x864&quality=96&sign=8ee2e2a06a157024dfff7c6e697ae19b&type=album)  

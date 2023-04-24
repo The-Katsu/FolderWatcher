@@ -24,11 +24,11 @@ public class FileWatcherFactory
     /// Запоминаем конфигурацию для всего класса.
     /// Инициализируем наблюдателя и подписываемся на события.
     /// Затем объявляем таймер и управляем с его помощью наблюдателем:
-    /// 1. Проверяем интервал рабочего времени.
-    /// 2. В случае подходящего интервала запускаем наблюдателя (если не запущен)
-    /// 3. В случае выхода за интервал отключаем таймер (если включен)
+    /// Логика работы таймера простая:
+    /// Минимальная работа cron - 1 минута (* * * * *)
+    /// Получается, если между работами разница 1 минута и меньше, то они идут друг за другом.
+    /// Таким образом получаем интервал, с учётом того, что работа не должна начинаться раньше первого тика за день.
     /// Включение и выключение контролируем флагом isWatching
-    /// Первый раз таймер запускаем с минимальным интервалом, далее выставляем интервал проверки 30 секунд.
     /// </summary>
     /// <param name="configuration">Конфигурация сервиса</param>
     public void CreateWatcher(FileWatcherConfiguration configuration)
@@ -41,37 +41,36 @@ public class FileWatcherFactory
         _fileWatcher.Created += OnChanged;
         _fileWatcher.Changed += OnChanged;
         _fileWatcher.Deleted += OnChanged;
-        _fileWatcher.Renamed += OnRenamed;
+        _fileWatcher.Renamed += OnChanged;
 
         _timer = new System.Timers.Timer();
         var isWatching = false;
         var cronExpression = CronExpression.Parse(_configuration.Cron);
-        _timer.Interval = 1; // Для первого старта без задержек
-        _timer.AutoReset = true; // Держим таймер активным для проверки периода
+        var now = DateTime.Now;
+        var next = CronUtils.GetNextOccurrence(cronExpression);
+        var delay = next - now;
+        _timer.Interval = CronUtils.CheckInterval(cronExpression, next) ? 1 : delay.TotalMilliseconds;
         _timer.Elapsed += (_,_) =>
         {
-            _timer.Interval = 30000; // 30 секунд, успеть в минимальный интервал * * * * * (каждую минуту) 
-            var start = CronUtils.GetFirstOccurrenceOfTheDay(cronExpression);
-            var end = CronUtils.GetLastOccurrenceOfTheDay(cronExpression);
-            var now = DateTime.Now;
-            if (now >= start && now <= end && !isWatching) 
+            now = DateTime.Now;
+            next = CronUtils.GetNextOccurrence(cronExpression);
+            delay = next - now;
+            _timer.Interval = delay.TotalMilliseconds;
+            if (delay <= TimeSpan.FromMinutes(1) && !isWatching)
             {
-                _logger.LogInformation(
-                    "Запущен просмотр папки '{WatchPath}', {Date} в период {Start} : {End}...", 
-                    _configuration.Path, now.ToString("d"), start.ToString("t"), end.ToString("t"));
+                _logger.LogInformation("Запущен просмотр папки '{WatchPath}'...", _configuration.Path);
                 isWatching = true;
                 _fileWatcher.EnableRaisingEvents = true;
             }
-            else if ((now < start || now > end) && isWatching)
+            else if (delay > TimeSpan.FromMinutes(1) && isWatching)
             {
-                _logger.LogInformation(
-                    "Просмотр папки '{WatchPath}' приостановлен до следующего периода...", _configuration.Path);
+                _logger.LogInformation("Просмотр папки '{WatchPath}' приостановлен до {Next}...", 
+                    _configuration.Path, next.ToString("g"));
                 isWatching = false;
                 _fileWatcher.EnableRaisingEvents = false;
-                _storage.LogAllChanges();
             }
         };
-        _timer.Start();
+        _timer.Enabled = true;
     }
     
     /// <summary>
@@ -87,7 +86,7 @@ public class FileWatcherFactory
         _fileWatcher.Created -= OnChanged;
         _fileWatcher.Changed -= OnChanged;
         _fileWatcher.Deleted -= OnChanged;
-        _fileWatcher.Renamed -= OnRenamed;
+        _fileWatcher.Renamed -= OnChanged;
         _fileWatcher.EnableRaisingEvents = false;
         _fileWatcher.Dispose();
     }
@@ -116,22 +115,12 @@ public class FileWatcherFactory
                 _logger.LogInformation("Изменен: {EFullPath}", path);
                 _storage.AddChanged(path);
                 break;
+            case WatcherChangeTypes.Renamed:
+                var renamed = (RenamedEventArgs) e;
+                var oldPath = IoUtils.GetRelativePath(_configuration.Path, renamed.OldFullPath);
+                _logger.LogInformation("Переименован: {EOldFullPath} -> {EFullPath}",oldPath,path);
+                _storage.UpdateAfterRenaming(oldPath, path);
+                break;
         }
-    }
-    
-    /// <summary>
-    /// Проверяем источник события, если папка - пропускаем, если файл - логируем и сохраняем изменения.
-    /// FileSystemEventArgs не имеет поля OldFullPath, потому выносим в отдельный метод.
-    /// </summary>
-    /// <param name="sender">Представляет объект, который вызвал событие</param>
-    /// <param name="e">Источник события</param>
-    private void OnRenamed(object sender, RenamedEventArgs e)
-    {
-        if (Directory.Exists(e.FullPath)) return;
-        
-        var oldPath = IoUtils.GetRelativePath(_configuration.Path, e.OldFullPath);
-        var newPath = IoUtils.GetRelativePath(_configuration.Path, e.FullPath);
-        _logger.LogInformation("Переименован: {EOldFullPath} -> {EFullPath}",oldPath,newPath);
-        _storage.UpdateAfterRenaming(oldPath, newPath);
     }
 }
